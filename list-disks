@@ -1,0 +1,796 @@
+#!/bin/perl
+
+# Disk map generator for Solaris.
+# Copyright (c) 2000-2005 Finn Thain
+# fthain@telegraphics.com.au
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+
+# The above copyright notice and this permission notice shall be included in 
+# all copies or substantial portions of the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+# IN THE SOFTWARE.
+
+###############################################################################
+
+# Note to those who might modify this script: it is intended to
+# run on Perl version 5.002 and later.
+
+use strict;
+require "hostname.pl";
+
+$::list_disks_version = "1.0";
+
+sub date_stamp {
+  my( $S, $M, $H, $d, $m, $y ) = ( localtime( time() ) )[ 0, 1, 2, 3, 4, 5 ];
+  $m++;
+  $y += 1900;
+  sprintf( "%02d:%02d:%02d on %04d/%02d/%02d", $H, $M, $S, $y, $m, $d );
+}
+
+sub bytes2str {
+  my( $mantissa ) = int( shift );
+  my( $suffix ) = 0;
+  while( ( $mantissa + 0 ) >= 1024 ) { $mantissa /= 1024; $suffix++ }
+  if( $suffix ) {
+    if ( $mantissa >= 100 ) {
+      $mantissa = int( $mantissa );
+    } elsif ( $mantissa >= 10 ) {
+      $mantissa = sprintf( "%.1f", $mantissa );
+    } else {
+      $mantissa = sprintf( "%.2f", $mantissa );
+    }
+  }
+  ( $mantissa, ( "B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB" )[ $suffix ] )
+}
+
+sub acquire_disk {
+  my( $target, $logical, $c );
+  my( $device ) = shift;
+  $device =~ s/^\/dev\/r?dsk\///;
+  if( $device =~ /^((c\d+)t\d+d\d+(s\d+)?)$/ ) {
+    ( $logical, $c ) = ( $1, $2 );
+    $logical =~ s/s\d+$//;
+    $target = readlink( "/dev/dsk/${logical}s2" );
+    if( $target =~
+        s/\.\.\/\.\.\/devices(\/(.*)\/ss?d@[^:]+):.*$/$1/ ) {
+      if( defined( $::disk{ $logical } ) ) {
+        die( "disk weirdness" )
+          unless $::disk{ $logical }->{ "physical" } == $1
+      } else {
+        $::disk{ $logical } = { "physical" => $1 }
+      }
+      $::controller{ $2 } = $c
+    }
+  }
+}
+
+sub acquire_disk_suite {
+  my( $PATH_save ) = $ENV{ 'PATH' };
+  $ENV{ 'PATH' } = "/usr/opt/SUNWmd/sbin:/usr/sbin";
+  my( @replicas ) = `metadb`;
+  shift( @replicas );
+  grep {
+    if( /\s\/dev\/dsk\/(\S+)$/ ) {
+      $::replica{ $1 } = 0;
+      &acquire_disk( $1 )
+    }
+  } @replicas;
+
+  my( $metadevice, $device, $line );
+  $::metastat = join( "", `metastat -p` );
+  my( $metastat ) = $::metastat;
+  $metastat =~ s/(\s*)\\\n\s*/$1/sg;
+  for $line ( split( "\n", $metastat ) ) {
+    if( $line =~ /^(\S+) (-[rmtp]|\d+)( .*)$/ ) {
+      $metadevice = $1;
+      if( $2 eq "-r" ) {
+        my( $raid_array, $pool ) = split( " -h ", $3 );
+        $::hsp_for_md{ $metadevice } = $pool if defined $pool;
+        my( @raid_array ) = split( " ", $raid_array );
+        $::raid{ $metadevice } = [
+          map {
+            if( $_ =~ /^c\d+t\d+d\d+s\d+$/ ) {
+              &acquire_disk( $device );
+              $::raid_member{ $_ } = $metadevice;
+              $_
+            } elsif( $_ =~ /^d\d+$/ ) {
+              $::raid_member{ $_ } = $metadevice;
+              $_
+            } else { () }
+          } @raid_array
+        ]
+      } elsif( $2 eq "-m" ) {
+        my( @submirrors ) = split( " ", $3 );
+        pop( @submirrors );
+        $::mirror{ $metadevice } = \@submirrors;
+        grep { $::submirror{ $_ } = $metadevice } @submirrors
+      } elsif( $2 eq "-t" ) {
+        my( $master, $log ) = ( split( " ", $3 ) )[ 0, 1 ];
+        $::trans{ $metadevice } = { "master" => $master,
+                                    "log" => $log };
+        $::trans_master{ $master } = $log;
+        push( @{ $::trans_log{ $log } }, $metadevice );
+      } elsif( $2 eq "-p" ) {
+        my( $parent, $offset, $size ) = ( split( " ", $3 ) )[ 0, 2, 4 ];
+        if( $parent =~ /^c\d+t\d+d\d+s\d+$/ ) {
+          &acquire_disk( $device )
+        }
+        $::soft_partition{ $metadevice } = { parent => $parent,
+                                             offset => $offset,
+                                             size   => $size };
+        push( @{ $::soft_partition_parent{ $parent } }, $metadevice )
+      } else {
+        my( $concats, $pool ) = split( " -h ", $3 );
+        $::hsp_for_md{ $metadevice } = $pool if defined $pool;
+        my( @concat ) = map {
+          my( @stripes );
+          for $device ( split ) {
+            if( $device =~ /^c\d+t\d+d\d+s\d+$/ ) {
+              push( @stripes, $device );
+              &acquire_disk( $device );
+            } elsif( $device =~ /^d\d+$/ ) {
+              push( @stripes, $device )
+            }
+          }
+          if( $#stripes ) {
+            for $device ( @stripes ) {
+              $::stripe{ $device } = $metadevice
+            }
+          } else {
+            $::concat_part{ $stripes[ 0 ] } = $metadevice
+          }
+          \@stripes
+        } split( /\s+\d+\s+/, $concats );
+        shift( @concat );
+        $::concat{ $metadevice } = \@concat
+      }
+    } elsif( $line =~ /^(hsp\d+) (.*)$/ ) {
+      grep {
+        push( @{ $::hsp{ $_ } }, $1 );
+        &acquire_disk( $_ );
+      } split( " ", $2 );
+    }
+  }
+}
+
+sub acquire_swap {
+  my( $device );
+  grep {
+    if( /^(\S*).*/ and $1 ne "swapfile" ) {
+      $device = $1;
+      if( $device =~ /^\/dev\/dsk\/(c\d+t\d+d\d+s\d+)$/ ) {
+        &acquire_disk( $1 );
+        $::physical_swap{ $1 } = 0
+      } elsif( $device =~ /^\/dev\/md\/dsk\/(.*)$/ ) {
+        $::meta_swap{ $1 } = 0
+      }
+    }
+  } `/usr/sbin/swap -l`
+}
+  
+sub acquire_mount {
+  grep {
+    my( $device, $mountpoint, $type ) = ( split )[ 0, 2, 3 ];
+    if( $type !~ /^(tmpfs)|(proc)|(fd)|(nfs)|(lofs)$/
+        and $device !~ /^\/vol\// ) {
+      if( $device =~ /^\/dev\/dsk\/(c\d+t\d+d\d+s\d+)$/ ) {
+        &acquire_disk( $1 );
+        $::physical_mount{ $1 } = $mountpoint;
+      } elsif( $device =~ /^\/dev\/md\/dsk\/(.*)$/ ) {
+        $::meta_mount{ $1 } = $mountpoint
+      }
+    }
+  } `/usr/sbin/mount -p`
+}
+  
+sub acquire_toc {
+  my( $n, $result, $logical );
+  for $logical ( keys %::disk ) {
+    my( $d ) = $::disk{ $logical };
+    $result = join( "", `echo inquiry | /usr/sbin/format -d $logical` );
+    ( $d->{ "vendor" }, $d->{ "product" }, $d->{ "revision" } ) =
+      ( $result =~ /Vendor:\s+(.*)\nProduct:\s+(.*)\nRevision:\s+(.*)$/mg );
+    $d->{ "toc" } = [ `/usr/sbin/prtvtoc /dev/rdsk/${logical}s2` ];
+    my( %size, $s );
+    if( ( $? >> 8 ) == 0 ) {
+      ( $d->{ "blpc" }, $d->{ "bpbl" } ) = (
+          split " ", ( `/usr/sbin/devinfo -i /dev/rdsk/${logical}s2` )[ 0 ]
+        )[ 3, 4 ];
+      for $n ( map { /^[^\*]\s+(\d+)/ } @{ $d->{"toc"} } ) {
+        $s = (
+            split " ", ( `/usr/sbin/devinfo -p /dev/rdsk/${logical}s$n` )[ 0 ]
+          )[ 4 ];
+        $s and $size{ $n } = $s
+      }
+    }
+    $d->{ "size" } = \%size;
+  }
+}
+      
+sub acquire_cdrom {
+  my( $D, $physical, $c ) = "/vol/dev/aliases/";
+  opendir( D, $D );
+  grep {
+    if( /^cdrom\d+$/ and -l $D.$_ ) {
+      my( $logical ) = readlink( $D.$_ );
+      if( $logical =~ s/^\/vol(\/dev\/rdsk\/((c\d*)t\d*d\d*))\/[^\\]+$/$2/ ) {
+        $c = $3;
+        $physical = readlink( $1."s2" );
+        if( $physical =~ s/^\.\.\/\.\.\/devices(\/(.*)\/sd@\d+,\d+):.*$/$1/ ) {
+          $::cdrom{ $logical } = $physical;
+          if( !defined( $::controller{ $2 } ) ) {
+            $::controller{ $2 } = $c
+          }
+        }
+      }
+    }
+  } readdir D;
+  closedir D;
+}
+  
+sub acquire_tape {
+  my( %tape_device, @possible, $result, $target );
+  my( $D ) = "/dev/rmt/";
+  opendir( D, $D );
+  grep {
+    my( %tape );
+    my( $special ) = $D.$_;
+    if( /^\d/ and -l $special ) {
+      $target = readlink( $special );
+      if( $target =~ s/^\.\.\/\.\.\/devices(\/(.*)\/st@(\d+),(\d+)):$/$1/ ) {
+        if( !defined( $tape_device{ $1 } ) ) {
+          $tape_device{ $1 }    = 0;
+          $tape{ "special" }    = $special;
+          $tape{ "physical" }   = $1;
+          $tape{ "controller" } = $2;
+          $tape{ "target" }     = $3;
+          $tape{ "unit" }       = $4;
+          push( @possible, \%tape )
+        }
+      }
+    }
+  } readdir D;
+  closedir D;
+  
+  my( $c );
+  grep {
+    $result = ( `/bin/mt -f $_->{ "special" } stat` )[ 0 ];
+    if( !( $? >> 8 ) ) {
+      chop( $result );
+      $result =~ s/:$//;
+      $_->{ "type" } = $result;
+      push( @::tapes, $_ );
+      $c = $_->{ "controller" };
+      if( !defined( $::controller{ $c } ) ) {
+        $::controller{ $c } = ""
+      } else {
+        $::tape{ $::controller{ $c }.
+                 "t".$_->{ "target" }.
+                 "d".$_->{ "unit" } } = $_
+      }
+    }
+  } @possible;
+}
+  
+sub acquire_instance {
+  open( P2I, "</etc/path_to_inst" ) || die "couln't open /etc/path_to_inst";
+  while( <P2I> ) {
+    if( /^"([^"]+)" (\d+) "([^"]+)"$/ ) {
+      if( $3 eq "st" or $3 eq "sd" or $3 eq "ssd" ) {
+        $::instance{ $1 } = "$3$2"
+      }
+    }
+  }
+  close P2I;
+}
+  
+###############################################################################
+
+sub output_html_header {
+  print HTML <<END;
+<HTML>
+<HEAD>
+   <META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=iso-8859-1">
+   <META NAME="GENERATOR" CONTENT="$0-$::list_disks_version">
+   <TITLE>$::hostname</TITLE>
+</HEAD>
+<BODY TEXT="#000000" BGCOLOR="#FFFFFF" LINK="#0000EE" VLINK="#551A8B" ALINK="#FF
+0000">
+
+<FONT SIZE="+1">$::hostname</FONT>
+<P>Disk configuration (generated at $::date_stamp)
+
+END
+}
+
+sub output_controller_html {
+  my( $c, @targets, $target, $t, $s, $slice, $text, $bgcolour, $fontcolour );
+  my( $mantissa, $suffix );
+  for $c ( sort { $::controller{ $::a } cmp $::controller{ $::b } } keys %::controller  ) {
+    print HTML <<END;
+<P><B>Controller $::controller{ $c }
+<BR>$c</B>
+ 
+<TABLE BORDER=0 CELLSPACING=0 CELLPADDING=0 BGCOLOR="#000000">
+<TR>
+  <TD>
+  <TABLE BORDER=0 CELLSPACING=2 CELLPADDING=2>
+END
+    if( $::controller{ $c } ) {
+      @targets = grep( /^$::controller{ $c }t/, ( keys( %::disk ),
+                                                  keys( %::cdrom ),
+                                                  keys( %::tape ) ) );
+      for $target ( sort { ( $::a =~ /t(\d+)d/ )[ 0 ] <=>
+                           ( $::b =~ /t(\d+)d/ )[ 0 ] } @targets ) {
+        print HTML qq(  <TR BGCOLOR="#FFFFFF">\n);
+        if( defined( $t = $::disk{ $target } ) ) {
+          print HTML qq(    <TD><A HREF="$::hostname-$target.txt">$target</A></TD>\n);
+          print HTML qq(    <TD>$::instance{ $t->{ physical } }</TD>\n);
+          print HTML qq(    <TD>$t->{ vendor } $t->{ product } rev. $t->{ revision }</TD>\n);
+          print HTML qq(    <TD>\n    <TABLE BORDER=0 CELLSPACING=0 CELLPADDING=0 WIDTH="100%">\n);
+          for $s ( keys( %{ $t->{ "size" } } ) ) {
+            $slice = "${target}s$s";
+            if( defined( $::hsp{ $slice } ) ) {
+              $bgcolour = $::colour{ "black" };
+              $fontcolour = $::colour{ "white" };
+              my @hsps = map( "<A NAME=\"$_\">$_</A>", @{ $::hsp{ $slice } } );
+              $text = "(in ".join( ", ", @hsps ).")";
+            } elsif( defined( $::physical_swap{ $slice } ) ) {
+              $bgcolour = $::colour{ "red" };
+              $fontcolour = $::colour{ "black" };
+              $text = "&nbsp;"
+            } elsif( defined( $::physical_mount{ $slice } ) ) {
+              $bgcolour = $::colour{ "grey" };
+              $fontcolour = $::colour{ "black" };
+              $text = "<TT>$::physical_mount{ $slice }</TT>"
+            } elsif( defined( $::replica{ $slice } ) ) {
+              $bgcolour = $::colour{ "indigo" };
+              $fontcolour = $::colour{ "white" };
+              $text = "&nbsp;"
+            } elsif( defined( $::raid_member{ $slice } ) ) {
+              $bgcolour = $::colour{ "violet" };
+              $fontcolour = $::colour{ "black" };
+              $text = "(part of <A HREF=\"#$::raid_member{ $slice }\">$::raid_member{ $slice }</A>)"
+            } elsif( defined( $::trans_log{ $slice } ) ) {
+              $bgcolour = $::colour{ "orange" };
+              $fontcolour = $::colour{ "black" };
+              $text = "(part of <A HREF=\"#$::trans_log{ $slice }\">$::trans_log{ $slice }</A>)"
+            } elsif( defined( $::trans_master{ $slice } ) ) {
+              $bgcolour = $::colour{ "orange" };
+              $fontcolour = $::colour{ "black" };
+              $text = "(part of <A HREF=\"#$::trans_master{ $slice }\">$::trans_master{ $slice }</A>)"
+            } elsif( defined( $::concat_part{ $slice } ) ) {
+              $bgcolour = $::colour{ "blue" };
+              $fontcolour = $::colour{ "black" };
+              $text = "(part of <A HREF=\"#$::concat_part{ $slice }\">$::concat_part{ $slice }</A>)"
+            } elsif( defined( $::stripe{ $slice } ) ) {
+              $bgcolour = $::colour{ "green" };
+              $fontcolour = $::colour{ "black" };
+              $text = "(part of <A HREF=\"#$::stripe{ $slice }\">$::stripe{ $slice }</A>)"
+            } elsif( defined $::soft_partition_parent{ $slice } ) {
+              $bgcolour = $::colour{ "brown" };
+              $fontcolour = $::colour{ "black" };
+              my @children = map( "<A HREF=\"#$_\">$_</A>",
+                                  @{ $::soft_partition_parent{ $slice } } );
+              $text = "(holds ".join( ", ", @children ).")"
+            } else {
+              $bgcolour = $::colour{ "white" };
+              $fontcolour = $::colour{ "black" };
+              $text = "&nbsp;"
+            }
+            ( $mantissa, $suffix ) = &bytes2str( $t->{ "size" }->{ $s } *
+                                                 $t->{ "bpbl" } );
+            print HTML qq(    <TR BGCOLOR="$bgcolour">\n);
+            print HTML qq(      <TD><FONT COLOR="$fontcolour">\n);
+            print HTML qq(        <A NAME="$slice">s$s&nbsp;&nbsp;</A>\n);
+            print HTML qq(      </FONT></TD>\n);
+            print HTML qq(      <TD ALIGN="CENTER"><FONT COLOR="$fontcolour">\n);
+            print HTML qq(        $text\n);
+            print HTML qq(      </FONT></TD>\n);
+            print HTML qq(      <TD ALIGN="RIGHT"><FONT COLOR="$fontcolour">\n);
+            print HTML qq(        &nbsp;&nbsp;$mantissa\n);
+            print HTML qq(      </FONT></TD>\n);
+            print HTML qq(      <TD><FONT COLOR="$fontcolour">\n);
+            print HTML qq(        &nbsp;$suffix\n);
+            print HTML qq(      </FONT></TD>\n);
+            print HTML qq(    </TR>\n);
+          }
+          print HTML qq(    </TABLE>\n    </TD>\n)
+        } elsif( defined( $t = $::cdrom{ $target } ) ) {
+          print HTML qq(    <TD>$target</TD>\n);
+          print HTML qq(    <TD>$::instance{ $t }</TD>\n);
+          print HTML qq(    <TD COLSPAN="2">CD- or DVD-ROM</TD>\n)
+        } elsif( defined( $t = $::tape{ $target } ) ) {
+          print HTML qq(    <TD>$target</TD>\n);
+          print HTML qq(    <TD>$::instance{ $t->{ physical } }</TD>\n);
+          print HTML qq(    <TD>$t->{ type }</TD>\n);
+          print HTML qq(    <TD><TT>$t->{ special }</TT></TD>\n)
+        }
+        print HTML qq(  </TR>\n);
+      }
+    } else {
+      for $t ( grep( $_->{ "controller" } eq $c, @::tapes ) ) {
+        print HTML qq(  <TR BGCOLOR="#FFFFFF">\n);
+        print HTML qq(    <TD>t$t->{ target }d$t->{ unit }</TD>\n);
+        print HTML qq(    <TD>$::instance{ $t->{ physical } }</TD>\n);
+        print HTML qq(    <TD>$t->{ type }</TD>\n);
+        print HTML qq(    <TD><TT>$t->{ special }</TT></TD>\n);
+        print HTML qq(  </TR>\n)
+      }
+    }
+    print HTML <<END
+  </TABLE>
+  </TD>
+</TR>
+</TABLE>
+ 
+END
+  }
+}
+  
+sub get_concat_rows {
+  scalar( @{ $::concat{ shift( @_ ) } } );
+}
+
+sub output_raid_html {
+  my( $start_col, $bgcolour, $text, $md ) = @_;
+  my( $rowspan ) = &get_raid_rows( $md );
+  my( $colspan ) = 4 - $start_col;
+  my( $indent ) = "  " x ( $start_col - 1 );
+  my( $first, $r );
+  my( $pool ) = " (has <A HREF=\"#$::hsp_for_md{ $md }\">$::hsp_for_md{ $md }</A>)" if defined $::hsp_for_md{ $md };
+  print HTML qq($indent    <TD ROWSPAN="$rowspan" BGCOLOR="$bgcolour">$text$pool);
+  print HTML qq(</TD>\n);
+  my( $disk );
+  for $disk ( @{ $::raid{ $md } } ) {
+    if( defined( $first ) ) {
+      print HTML qq($indent  <TR>\n)
+    } else {
+      $first = 0
+    }
+    $bgcolour = $::colour{ "violet" };
+    if( $disk =~ /^d\d+$/ ) {
+      $text = qq(<A NAME="$disk">$disk</A>);
+      my $parent = $::soft_partition{ $disk }->{ "parent" };
+      $text .= qq| (parent is <A HREF="#$parent">$parent</A>)|
+    } elsif( $disk =~ /^c\d+t\d+d\d+s\d+$/ ) {
+      $text = qq(<A HREF="#$disk">$disk</A>)
+    }
+    print HTML qq($indent    <TD COLSPAN="$colspan" BGCOLOR="$bgcolour">$text</TD>\n);
+    print HTML qq($indent  </TR>\n);
+  }
+}
+
+sub output_concat_html {
+  my( $start_col, $bgcolour, $text, $md ) = @_;
+  my( $rowspan ) = &get_concat_rows( $md );
+  my( $colspan ) = 4 - $start_col;
+  my( $indent ) = "  " x ( $start_col - 1 );
+  my( $first, $r );
+  print HTML qq($indent    <TD ROWSPAN="$rowspan" BGCOLOR="$bgcolour">$text);
+  print HTML qq(</TD>\n);
+  for $r ( @{ $::concat{ $md } } ) {
+    if( defined( $first ) ) {
+      print HTML qq($indent  <TR>\n)
+    } else {
+      $first = 0
+    }
+    if( scalar( @$r ) > 1 ) {
+      $bgcolour = $::colour{ "green" }
+    } else {
+      $bgcolour = $::colour{ "blue" }
+    }
+    my( @refs ) = @$r;
+    grep { s/^c\d+t\d+d\d+s\d+$/<A HREF="#$_">$_<\/A>/ } @refs;
+    grep { s/^d\d+$/$_ (<A HREF="#$::soft_partition{ $_ }->{ parent }">$::soft_partition{ $_ }->{ parent })<\/A>/ } @refs;
+    $text = join( ", ", @refs );
+    print HTML qq($indent    <TD COLSPAN="$colspan" BGCOLOR="$bgcolour">$text</TD>\n);
+    print HTML qq($indent  </TR>\n);
+  }
+}
+
+sub get_mirror_rows {
+  my( $md, $rows ) = shift;
+  grep { $rows += &get_concat_rows( $_ ) } @{ $::mirror{ $md } };
+  $rows
+}
+
+sub get_raid_rows {
+  scalar( @{ $::raid{ shift( @_ ) } } );
+}
+
+sub output_mirror_html {
+  my( $start_col, $bgcolour, $text, $md ) = @_;
+  my( $rowspan ) = &get_mirror_rows( $md );
+  my( $indent ) = "  " x ( $start_col - 1 );
+  my( $submirror_md, $first );
+  print HTML qq($indent    <TD ROWSPAN="$rowspan" BGCOLOR="$bgcolour">$text);
+  print HTML qq(</TD>\n);
+  for $submirror_md ( @{ $::mirror{ $md } } ) {
+    if( defined( $first ) ) {
+      print HTML qq($indent  <TR>\n)
+    } else {
+      $first = 0
+    }
+    my( $pool );
+    if( defined $::hsp_for_md{ $submirror_md } ) {
+      $pool = " (has $::hsp_for_md{ $submirror_md })"
+    }
+    $text = qq(<A NAME="$submirror_md">$submirror_md</A>$pool);
+    &output_concat_html( $start_col + 1, $::colour{ "yellow" }, $text,
+                         $submirror_md );
+  }
+}
+
+sub get_master_rows {
+  my( $md ) = shift;
+  if( defined( $::raid{ $md } ) ) {
+    &get_raid_rows( $md )
+  } elsif( defined( $::mirror{ $md } ) ) {
+    &get_mirror_rows( $md )
+  } elsif( defined( $::concat{ $md } ) ) {
+    &get_concat_rows( $md )
+  } else { 1 }
+}
+
+sub output_metadisk_html {
+  my( $bgcolour, $text );
+  if( %::concat || %::trans ) {
+    my( $md );
+    my( @column_one ) = sort { ( $::a =~ /(\d+)/ )[ 0 ] <=>
+                               ( $::b =~ /(\d+)/ )[ 0 ] }
+                             keys( %::trans ),
+                             grep( !defined( $::soft_partition_parent{ $_ } ),
+                                   keys %::raid ),
+                             grep( !( defined( $::trans_master{ $_ } ) ||
+                                      defined( $::trans_log{ $_ } ) ||
+                                      defined( $::soft_partition_parent{ $_ } ) ),
+                                   keys %::mirror ),
+                             grep( !( defined( $::submirror{ $_ } ) ||
+                                      defined( $::trans_master{ $_ } ) ||
+                                      defined( $::trans_log{ $_ } ) ||
+                                      defined( $::soft_partition_parent{ $_ } ) ),
+                                   keys %::concat ),
+                             grep( !( defined( $::concat{ $_ } ) ||
+                                      defined( $::stripe{ $_ } ) ||
+                                      defined( $::mirror{ $_ } ) ||
+                                      defined( $::raid_member{ $_ } ) ||
+                                      defined( $::submirror{ $_ } ) ||
+                                      defined( $::trans_master{ $_ } ) ||
+                                      defined( $::trans_log{ $_ } ) ),
+                                   keys %::soft_partition );
+    print HTML <<END;
+<P><B>Metadisk <A HREF="$::hostname-metastat.txt">State</A></B>
+<TABLE BORDER=0 CELLSPACING=0 CELLPADDING=0 BGCOLOR="#000000">
+<TR>
+  <TD>
+  <TABLE BORDER=0 CELLSPACING=2 CELLPADDING=2>
+END
+    while( @column_one ) {
+      $md = shift( @column_one );
+      if( defined( $::meta_swap{ $md } ) ) {
+        $bgcolour = $::colour{ "red" };
+        $text = qq(<A NAME="$md">$md</A>)
+      } elsif( defined( $::meta_mount{ $md } ) ) {
+        $bgcolour = $::colour{ "grey" };
+        $text = qq(<TT>$::meta_mount{ $md }</TT><BR><A NAME="$md">$md</A>)
+      } elsif( defined( $::trans_log{ $md } ) ) {
+        $bgcolour = $::colour{ "orange" };
+        $text = qq(<A NAME="$md">$md</A>)
+      } else {
+        $bgcolour = $::colour{ "white" };
+        $text = qq(<A NAME="$md">$md</A>)
+      }
+      if( defined( $::trans{ $md } ) ) {
+        my( $master ) = $::trans{ $md }->{ "master" };
+        my( $log )    = $::trans{ $md }->{ "log" };
+        my( $rows )   = &get_master_rows( $master ) + 1;
+        print HTML qq(  <TR>\n);
+        print HTML qq(    <TD ROWSPAN="$rows" BGCOLOR="$bgcolour">$text</TD>\n);
+        $bgcolour = $::colour{ "orange" };
+        $text = qq(Master: <A NAME="$master">$master</A>);
+        if( defined( $::mirror{ $master } ) ) {
+          &output_mirror_html( 2, $bgcolour, $text, $master );
+        } elsif( defined( $::concat{ $master } ) ) {
+          &output_concat_html( 2, $bgcolour, $text, $master );
+        } else {
+          $text = qq(Master: <A HREF="#$master">$master</A>);
+          print HTML qq(    <TD COLSPAN="3" BGCOLOR="$bgcolour">$text</TD>\n);
+          print HTML qq(  </TR>\n)
+        }
+        print HTML qq(  <TR>\n);
+        $text = qq(Log: <A HREF="#$log">$log</A>);
+        print HTML qq(    <TD COLSPAN="3" BGCOLOR="$bgcolour">$text</TD>\n);
+        print HTML qq(  </TR>\n);
+      } elsif( defined( $::raid{ $md } ) ) {
+        print HTML qq(  <TR>\n);
+        &output_raid_html( 1, $bgcolour, $text, $md );
+      } elsif( defined( $::mirror{ $md } ) ) {
+        print HTML qq(  <TR>\n);
+        &output_mirror_html( 1, $bgcolour, $text, $md );
+      } elsif( defined( $::concat{ $md } ) ) {
+        print HTML qq(  <TR>\n);
+        &output_concat_html( 1, $bgcolour, $text, $md );
+      } elsif( defined( $::soft_partition{ $md } ) ) {
+        my( $parent ) = $::soft_partition{ $md }->{ "parent" };
+        my( $rows )   = &get_master_rows( $parent );
+        print HTML qq(  <TR>\n);
+        print HTML qq(    <TD ROWSPAN="$rows" BGCOLOR="$bgcolour">$text</TD>\n);
+        $bgcolour = $::colour{ "brown" };
+        $text = qq(<A NAME="$parent">$parent</A>);
+        if( defined( $::mirror{ $parent } ) ) {
+          &output_mirror_html( 2, $bgcolour, $text, $parent );
+        } elsif( defined( $::concat{ $parent } ) ) {
+          &output_concat_html( 2, $bgcolour, $text, $parent );
+        } elsif( defined( $::raid{ $parent } ) ) {
+          &output_raid_html( 2, $bgcolour, $text, $parent );
+        } else {
+          $text = qq(<A HREF="#$parent">$parent</A>);
+          print HTML qq(    <TD COLSPAN="3" BGCOLOR="$bgcolour">$text</TD>\n);
+        }
+        print HTML qq(  </TR>\n);
+      } else { die "column one weirdness" }
+    }
+    print HTML <<END
+  </TABLE>
+  </TD>
+</TR>
+</TABLE>
+
+END
+  }
+}
+
+sub output_legend_html {
+  print HTML <<END;
+<P><B>Legend</B>
+<TABLE BORDER=0 CELLSPACING=0 CELLPADDING=0 BGCOLOR="#000000">
+<TR>
+  <TD>
+  <TABLE BORDER=0 CELLSPACING=2 CELLPADDING=2>
+END
+  if( %::hsp ) {
+    print HTML <<END;
+  <TR BGCOLOR="$::colour{black}">
+    <TD><FONT COLOR="$::colour{white}">Hot spare</FONT></TD>
+  </TR>
+END
+  }
+  if( %::soft_partition ) {
+    print HTML <<END;
+  <TR BGCOLOR="$::colour{brown}">
+    <TD>Soft partition parent</TD>
+  </TR>
+END
+  }
+  print HTML <<END;
+  <TR BGCOLOR="$::colour{red}">
+    <TD>Active swap</TD>
+  </TR>
+END
+  if( %::trans ) {
+    print HTML <<END;
+  <TR BGCOLOR="$::colour{orange}">
+    <TD>Metatrans master or log</TD>
+  </TR>
+END
+  }
+  if( %::concat ) {
+    print HTML <<END;
+  <TR BGCOLOR="$::colour{yellow}">
+    <TD>Submirror</TD>
+  </TR>
+  <TR BGCOLOR="$::colour{green}">
+    <TD>Stripe</TD>
+  </TR>
+  <TR BGCOLOR="$::colour{blue}">
+    <TD>Concatenation</TD>
+  </TR>
+END
+  }
+  if( %::replica ) {
+    print HTML <<END;
+  <TR BGCOLOR="$::colour{indigo}">
+    <TD><FONT COLOR="$::colour{white}">State replica</FONT></TD>
+  </TR>
+END
+  }
+  if( %::raid ) {
+    print HTML <<END;
+  <TR BGCOLOR="$::colour{violet}">
+    <TD>RAID set member</TD>
+  </TR>
+END
+  }
+  print HTML <<END
+  <TR BGCOLOR="$::colour{grey}">
+    <TD>Mounted filesystem</TD>
+  </TR>
+  <TR BGCOLOR="$::colour{white}">
+    <TD>Other</TD>
+  </TR>
+  </TABLE>
+  </TD>
+</TR>
+</TABLE>
+ 
+END
+}
+
+sub output_html_footer {
+  print HTML <<END;
+</BODY>
+</HTML>
+END
+}
+
+sub output_text {
+  my( $d );
+  for $d ( keys %::disk ) {
+    open( TEXT, ">$::dir/$::hostname-$d.txt" ) || die "couldn't open toc dump";
+    print TEXT join( "", @{$::disk{ $d }->{ "toc" }} );
+    close TEXT
+  }
+  if( $::metastat ) {
+    open( TEXT, ">$::dir/$::hostname-metastat.txt" )
+      || die "couldn't open metastat dump";
+    print TEXT $::metastat;
+    close TEXT
+  }
+}
+  
+###############################################################################
+  
+$::dir = shift;
+( -d $::dir && -w $::dir ) or die <<USAGE;
+usage: $0 <directory> [ <extra disk>... ]
+Creates HTML and linked text files in the nominated directory.  The HTML is a
+tabular representation of SCSI disks,  tapes and CD-ROM drives.  Doesn't list
+devices that are  not in use,  unless they are included  in the <extra disks>
+arguments. Tape drives must have media loaded and CD-ROMs and disks must have
+slices in use (as swap, mounted filesystems, hot spares or metadevices) or be
+passed in on the command line; otherwise they will not be listed.
+Version: $::list_disks_version
+USAGE
+%::colour = ( "black"  => "#000000",
+              "brown"  => "#CC9900",
+              "red"    => "#FF6666",
+              "orange" => "#FFAA33",
+              "yellow" => "#FFFF33",
+              "green"  => "#66FF66",
+              "blue"   => "#77AAFF",
+              "indigo" => "#C060C0",
+              "violet" => "#FF99FF",
+              "grey"   => "#AAAAAA",
+              "white"  => "#FFFFFF" );
+$::hostname = &hostname;
+$::date_stamp = &date_stamp;
+eval( 'grep { &acquire_disk( $_ ) } @::ARGV' );
+eval( '&acquire_disk_suite' );
+eval( '&acquire_swap' );
+eval( '&acquire_mount' );
+eval( '&acquire_toc' );
+eval( '&acquire_cdrom' );
+eval( '&acquire_tape' );
+eval( '&acquire_instance' );
+  
+open( HTML, ">$::dir/$::hostname.html" ) || die "couldn't open html file";
+&output_html_header;
+&output_controller_html;
+&output_metadisk_html;
+&output_legend_html;
+&output_html_footer;
+close HTML;
+&output_text

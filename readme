@@ -1,0 +1,70 @@
+Disk Map Generator script
+http://www.telegraphics.com.au/~fthain/sw/list-disks
+
+
+PURPOSE
+
+This script generates a disk map: a tabular, HTML representation of the
+DiskSuite and SCSI configuration of a Sun Solaris system.
+
+A disk map is useful to quickly answer questions like, "what is the SCSI ID of
+/dev/rmt/3?", "is there any unused space on any drives?" and "what controllers
+are used for this mirror?", "what were the effects of that reconfiguration
+boot?" and "what sort of drives are these?".
+
+You can easily get this information from other programs, but it is scattered,
+hard to find, and probably unobtainable in a recovery situation. I've also
+found that this kind of overview is helpful when coming to grips with an
+unfamiliar system.
+
+
+INSTRUCTIONS
+
+Invoke the script as root, something like this,
+
+# mkdir some/path/hostname-YYYYMMDD
+# list-disks some/path/hostname-YYYYMMDD
+
+Execution can take a minute or so on large systems.
+
+By default, disks without any slices in use as swap, mounted filesystems, hot
+spares or metadevices are not listed but they can be included explicitly
+by passing the appropriate c-t-d- identifiers on the command line.
+
+Tape drives will be shown if they have media loaded. CD-ROM drives must have
+media mounted in order to show up.
+
+Disks and slices in use by Veritas, or as raw database extents etc will show
+up as unused, if at all.
+
+A slice that is shared by both swap space and a filesystem is likely to be
+misrepresented.
+
+
+RELEASE NOTES
+
+Version 1.0
+
+Tested with Perl 5.002, 5.6 and Solaris SPARC 2.8 and 2.9 and DiskSuite 4.2.1.
+Older versions of list-disks have been tested on Solaris SPARC 2.5, 2.6, 2.7.
+The HTML may or may not be well-formed. I does render in Mozilla and Safari,
+which is sufficient for my purposes. Note to perl hackers: this script
+unashamedly uses the accumulate-and-fire "anti-pattern", lots of global
+variables, no comments and weird indentation and spacing. So there.
+
+
+TO DO
+
+- add some indication of multipath I/O, where available
+- support ATA devices
+
+
+ACKNOWLEDGEMENTS
+
+My thanks to those that "sponsored" this work, being those who happened to be
+employing me when I was developing it, for allowing me to retain the rights.
+
+
+CONTACT
+
+Send bug reports to fthain@telegraphics.com.au.
