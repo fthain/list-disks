@@ -1,0 +1,29 @@
+d0 -m d20 d21 1
+d20 1 1 c1t0d0s0
+d21 1 1 c1t1d0s0
+d1 -m d10 d11 1
+d10 1 1 c1t0d0s1
+d11 1 1 c1t1d0s1
+d3 -m d30 d31 1
+d30 1 1 c1t0d0s3
+d31 1 1 c1t1d0s3
+d5 -m d50 d51 1
+d50 1 1 c1t0d0s5
+d51 1 1 c1t1d0s5
+d6 -m d61 d60 1
+d61 1 1 c1t1d0s7
+d60 1 1 c1t0d0s7
+d102 -r c1t2d0s4 c1t3d0s4 c1t4d0s4 c1t5d0s4 c1t8d0s4 -k -i 64b -h hsp000
+d103 -r c1t2d0s5 c1t3d0s5 c1t4d0s5 c1t9d0s5 -k -i 64b -h hsp000
+d108 -r c1t9d0s4 c1t10d0s4 c1t11d0s4 c1t12d0s4 -k -i 64b -h hsp000
+d109 -r c1t2d0s3 c1t3d0s3 c1t9d0s3 -k -i 64b -h hsp000
+d121 -r c1t2d0s7 c1t3d0s7 c1t9d0s7 c1t10d0s7 -k -i 32b -h hsp000
+d122 -r c1t11d0s7 c1t5d0s7 c1t12d0s7 c1t8d0s7 c1t4d0s7 -k -i 32b -h hsp000
+d123 -r c1t2d0s6 c1t3d0s6 c1t4d0s6 c1t9d0s6 c1t10d0s6 -k -i 64b -h hsp000
+d124 -r c1t8d0s6 c1t5d0s6 c1t12d0s6 c1t11d0s6 -k -i 32b -h hsp000
+d125 -r c1t11d0s5 c1t5d0s5 c1t12d0s5 c1t8d0s5 -k -i 32b -h hsp000
+d101 1 9 c1t2d0s1 c1t3d0s1 c1t4d0s1 c1t5d0s1 c1t8d0s1 c1t9d0s1 c1t10d0s1 c1t11d0s1 c1t12d0s1 -i 64b
+d104 1 3 c1t5d0s3 c1t12d0s3 c1t8d0s3 -i 64b
+d105 1 3 c1t4d0s3 c1t10d0s3 c1t11d0s3 -i 128b
+d126 1 2 c3t0d0s0 c4t0d0s0 -i 64b
+hsp000 c1t13d0s3 c1t13d0s4 c1t13d0s5 c1t13d0s6 c1t13d0s7 c1t13d0s1
