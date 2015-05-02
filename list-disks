@@ -4,7 +4,7 @@
 # Copyright (c) 2000-2005 Finn Thain
 # fthain@telegraphics.com.au
 
-# Portions (c) 2003 Mario Piazzese
+# Portions Copyright (c) 2002-2005 Mario Piazzese
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -30,9 +30,9 @@
 # run on Perl version 5.002 and later.
 
 use strict;
-require "hostname.pl";
+use POSIX qw(uname);
 
-$::list_disks_version = "1.1";
+$::list_disks_version = "1.2";
 
 sub date_stamp {
   my( $S, $M, $H, $d, $m, $y ) = ( localtime( time() ) )[ 0, 1, 2, 3, 4, 5 ];
@@ -86,7 +86,7 @@ sub acquire_disk_suite {
   grep {
     if( /\s\/dev\/dsk\/(\S+)$/ ) {
       $::replica{ $1 } = 0;
-      &acquire_disk( $1 )
+      &::acquire_disk( $1 )
     }
   } @replicas;
 
@@ -104,7 +104,7 @@ sub acquire_disk_suite {
         $::raid{ $metadevice } = [
           map {
             if( $_ =~ /^c\d+t[0-9A-F]+d\d+s\d+$/ ) {
-              &acquire_disk( $device );
+              &::acquire_disk( $device );
               $::raid_member{ $_ } = $metadevice;
               $_
             } elsif( $_ =~ /^d\d+$/ ) {
@@ -141,7 +141,7 @@ sub acquire_disk_suite {
           for $device ( split ) {
             if( $device =~ /^c\d+t[0-9A-F]+d\d+s\d+$/ ) {
               push( @stripes, $device );
-              &acquire_disk( $device );
+              &::acquire_disk( $device );
             } elsif( $device =~ /^d\d+$/ ) {
               push( @stripes, $device )
             }
@@ -161,10 +161,11 @@ sub acquire_disk_suite {
     } elsif( $line =~ /^(hsp\d+) (.*)$/ ) {
       grep {
         push( @{ $::hsp{ $_ } }, $1 );
-        &acquire_disk( $_ );
+        &::acquire_disk( $_ );
       } split( " ", $2 );
     }
   }
+  $ENV{ 'PATH' } = $PATH_save;
 }
 
 sub acquire_swap {
@@ -173,7 +174,7 @@ sub acquire_swap {
     if( /^(\S*).*/ and $1 ne "swapfile" ) {
       $device = $1;
       if( $device =~ /^\/dev\/dsk\/(c\d+t[0-9A-F]+d\d+s\d+)$/ ) {
-        &acquire_disk( $1 );
+        &::acquire_disk( $1 );
         $::physical_swap{ $1 } = 0
       } elsif( $device =~ /^\/dev\/md\/dsk\/(.*)$/ ) {
         $::meta_swap{ $1 } = 0
@@ -188,7 +189,7 @@ sub acquire_mount {
     if( $type !~ /^(tmpfs)|(proc)|(fd)|(nfs)|(lofs)$/
         and $device !~ /^\/vol\// ) {
       if( $device =~ /^\/dev\/dsk\/(c\d+t[0-9A-F]+d\d+s\d+)$/ ) {
-        &acquire_disk( $1 );
+        &::acquire_disk( $1 );
         $::physical_mount{ $1 } = $mountpoint;
       } elsif( $device =~ /^\/dev\/md\/dsk\/(.*)$/ ) {
         $::meta_mount{ $1 } = $mountpoint
@@ -330,6 +331,7 @@ sub output_html_header {
 
 <FONT SIZE="+1">$::hostname</FONT>
 <P>Disk configuration (generated at $::date_stamp)
+<P>Running: $::kernel $::release, patch revision $::version, $::hardware
 
 END
 }
@@ -494,7 +496,7 @@ sub output_raid_html {
 
 sub output_concat_html {
   my( $start_col, $bgcolour, $text, $md ) = @_;
-  my( $rowspan ) = &get_concat_rows( $md );
+  my( $rowspan ) = &::get_concat_rows( $md );
   my( $colspan ) = 4 - $start_col;
   my( $indent ) = "  " x ( $start_col - 1 );
   my( $first, $r );
@@ -522,7 +524,7 @@ sub output_concat_html {
 
 sub get_mirror_rows {
   my( $md, $rows ) = shift;
-  grep { $rows += &get_concat_rows( $_ ) } @{ $::mirror{ $md } };
+  grep { $rows += &::get_concat_rows( $_ ) } @{ $::mirror{ $md } };
   $rows
 }
 
@@ -532,7 +534,7 @@ sub get_raid_rows {
 
 sub output_mirror_html {
   my( $start_col, $bgcolour, $text, $md ) = @_;
-  my( $rowspan ) = &get_mirror_rows( $md );
+  my( $rowspan ) = &::get_mirror_rows( $md );
   my( $indent ) = "  " x ( $start_col - 1 );
   my( $submirror_md, $first );
   print HTML qq($indent    <TD ROWSPAN="$rowspan" BGCOLOR="$bgcolour">$text);
@@ -548,19 +550,19 @@ sub output_mirror_html {
       $pool = " (has $::hsp_for_md{ $submirror_md })"
     }
     $text = qq(<A NAME="$submirror_md">$submirror_md</A>$pool);
-    &output_concat_html( $start_col + 1, $::colour{ "yellow" }, $text,
-                         $submirror_md );
+    &::output_concat_html( $start_col + 1, $::colour{ "yellow" }, $text,
+                           $submirror_md );
   }
 }
 
 sub get_master_rows {
   my( $md ) = shift;
   if( defined( $::raid{ $md } ) ) {
-    &get_raid_rows( $md )
+    &::get_raid_rows( $md )
   } elsif( defined( $::mirror{ $md } ) ) {
-    &get_mirror_rows( $md )
+    &::get_mirror_rows( $md )
   } elsif( defined( $::concat{ $md } ) ) {
-    &get_concat_rows( $md )
+    &::get_concat_rows( $md )
   } else { 1 }
 }
 
@@ -615,15 +617,15 @@ END
       if( defined( $::trans{ $md } ) ) {
         my( $master ) = $::trans{ $md }->{ "master" };
         my( $log )    = $::trans{ $md }->{ "log" };
-        my( $rows )   = &get_master_rows( $master ) + 1;
+        my( $rows )   = &::get_master_rows( $master ) + 1;
         print HTML qq(  <TR>\n);
         print HTML qq(    <TD ROWSPAN="$rows" BGCOLOR="$bgcolour">$text</TD>\n);
         $bgcolour = $::colour{ "orange" };
         $text = qq(Master: <A NAME="$master">$master</A>);
         if( defined( $::mirror{ $master } ) ) {
-          &output_mirror_html( 2, $bgcolour, $text, $master );
+          &::output_mirror_html( 2, $bgcolour, $text, $master );
         } elsif( defined( $::concat{ $master } ) ) {
-          &output_concat_html( 2, $bgcolour, $text, $master );
+          &::output_concat_html( 2, $bgcolour, $text, $master );
         } else {
           $text = qq(Master: <A HREF="#$master">$master</A>);
           print HTML qq(    <TD COLSPAN="3" BGCOLOR="$bgcolour">$text</TD>\n);
@@ -635,26 +637,26 @@ END
         print HTML qq(  </TR>\n);
       } elsif( defined( $::raid{ $md } ) ) {
         print HTML qq(  <TR>\n);
-        &output_raid_html( 1, $bgcolour, $text, $md );
+        &::output_raid_html( 1, $bgcolour, $text, $md );
       } elsif( defined( $::mirror{ $md } ) ) {
         print HTML qq(  <TR>\n);
-        &output_mirror_html( 1, $bgcolour, $text, $md );
+        &::output_mirror_html( 1, $bgcolour, $text, $md );
       } elsif( defined( $::concat{ $md } ) ) {
         print HTML qq(  <TR>\n);
-        &output_concat_html( 1, $bgcolour, $text, $md );
+        &::output_concat_html( 1, $bgcolour, $text, $md );
       } elsif( defined( $::soft_partition{ $md } ) ) {
         my( $parent ) = $::soft_partition{ $md }->{ "parent" };
-        my( $rows )   = &get_master_rows( $parent );
+        my( $rows )   = &::get_master_rows( $parent );
         print HTML qq(  <TR>\n);
         print HTML qq(    <TD ROWSPAN="$rows" BGCOLOR="$bgcolour">$text</TD>\n);
         $bgcolour = $::colour{ "brown" };
         $text = qq(<A NAME="$parent">$parent</A>);
         if( defined( $::mirror{ $parent } ) ) {
-          &output_mirror_html( 2, $bgcolour, $text, $parent );
+          &::output_mirror_html( 2, $bgcolour, $text, $parent );
         } elsif( defined( $::concat{ $parent } ) ) {
-          &output_concat_html( 2, $bgcolour, $text, $parent );
+          &::output_concat_html( 2, $bgcolour, $text, $parent );
         } elsif( defined( $::raid{ $parent } ) ) {
-          &output_raid_html( 2, $bgcolour, $text, $parent );
+          &::output_raid_html( 2, $bgcolour, $text, $parent );
         } else {
           $text = qq(<A HREF="#$parent">$parent</A>);
           print HTML qq(    <TD COLSPAN="3" BGCOLOR="$bgcolour">$text</TD>\n);
@@ -821,24 +823,24 @@ USAGE
               "violet" => "#FF99FF",
               "grey"   => "#AAAAAA",
               "white"  => "#FFFFFF" );
-$::hostname = &hostname;
-$::date_stamp = &date_stamp;
-eval( 'grep { &acquire_disk( $_ ) } @::ARGV' );
-eval( '&acquire_disk_suite' );
-eval( '&acquire_swap' );
-eval( '&acquire_mount' );
-eval( '&acquire_toc' );
-eval( '&acquire_cdrom' );
-eval( '&acquire_tape' );
-eval( '&acquire_instance' );
+($::kernel, $::hostname, $::release, $::version, $::hardware) = uname();
+$::date_stamp = &::date_stamp;
+eval( 'grep { &::acquire_disk( $_ ) } @::ARGV' );
+eval( '&::acquire_disk_suite' );
+eval( '&::acquire_swap' );
+eval( '&::acquire_mount' );
+eval( '&::acquire_toc' );
+eval( '&::acquire_cdrom' );
+eval( '&::acquire_tape' );
+eval( '&::acquire_instance' );
 eval( '&::acquire_dump' );
 
 open( HTML, ">$::dir/$::hostname.html" ) || die "couldn't open html file";
-&output_html_header;
-&output_controller_html;
-&output_metadisk_html;
-&output_dump_html;
-&output_legend_html;
-&output_html_footer;
+&::output_html_header;
+&::output_controller_html;
+&::output_metadisk_html;
+&::output_dump_html;
+&::output_legend_html;
+&::output_html_footer;
 close HTML;
-&output_text
+&::output_text
