@@ -4,6 +4,8 @@
 # Copyright (c) 2000-2005 Finn Thain
 # fthain@telegraphics.com.au
 
+# Portions (c) 2003 Mario Piazzese
+
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
 # in the Software without restriction, including without limitation the rights
@@ -30,7 +32,7 @@
 use strict;
 require "hostname.pl";
 
-$::list_disks_version = "1.0";
+$::list_disks_version = "1.1";
 
 sub date_stamp {
   my( $S, $M, $H, $d, $m, $y ) = ( localtime( time() ) )[ 0, 1, 2, 3, 4, 5 ];
@@ -59,7 +61,7 @@ sub acquire_disk {
   my( $target, $logical, $c );
   my( $device ) = shift;
   $device =~ s/^\/dev\/r?dsk\///;
-  if( $device =~ /^((c\d+)t\d+d\d+(s\d+)?)$/ ) {
+  if( $device =~ /^((c\d+)t[0-9A-F]+d\d+(s\d+)?)$/ ) {
     ( $logical, $c ) = ( $1, $2 );
     $logical =~ s/s\d+$//;
     $target = readlink( "/dev/dsk/${logical}s2" );
@@ -67,7 +69,7 @@ sub acquire_disk {
         s/\.\.\/\.\.\/devices(\/(.*)\/ss?d@[^:]+):.*$/$1/ ) {
       if( defined( $::disk{ $logical } ) ) {
         die( "disk weirdness" )
-          unless $::disk{ $logical }->{ "physical" } == $1
+          unless $::disk{ $logical }->{ "physical" } eq $1
       } else {
         $::disk{ $logical } = { "physical" => $1 }
       }
@@ -101,7 +103,7 @@ sub acquire_disk_suite {
         my( @raid_array ) = split( " ", $raid_array );
         $::raid{ $metadevice } = [
           map {
-            if( $_ =~ /^c\d+t\d+d\d+s\d+$/ ) {
+            if( $_ =~ /^c\d+t[0-9A-F]+d\d+s\d+$/ ) {
               &acquire_disk( $device );
               $::raid_member{ $_ } = $metadevice;
               $_
@@ -124,7 +126,7 @@ sub acquire_disk_suite {
         push( @{ $::trans_log{ $log } }, $metadevice );
       } elsif( $2 eq "-p" ) {
         my( $parent, $offset, $size ) = ( split( " ", $3 ) )[ 0, 2, 4 ];
-        if( $parent =~ /^c\d+t\d+d\d+s\d+$/ ) {
+        if( $parent =~ /^c\d+t[0-9A-F]+d\d+s\d+$/ ) {
           &acquire_disk( $device )
         }
         $::soft_partition{ $metadevice } = { parent => $parent,
@@ -137,7 +139,7 @@ sub acquire_disk_suite {
         my( @concat ) = map {
           my( @stripes );
           for $device ( split ) {
-            if( $device =~ /^c\d+t\d+d\d+s\d+$/ ) {
+            if( $device =~ /^c\d+t[0-9A-F]+d\d+s\d+$/ ) {
               push( @stripes, $device );
               &acquire_disk( $device );
             } elsif( $device =~ /^d\d+$/ ) {
@@ -170,7 +172,7 @@ sub acquire_swap {
   grep {
     if( /^(\S*).*/ and $1 ne "swapfile" ) {
       $device = $1;
-      if( $device =~ /^\/dev\/dsk\/(c\d+t\d+d\d+s\d+)$/ ) {
+      if( $device =~ /^\/dev\/dsk\/(c\d+t[0-9A-F]+d\d+s\d+)$/ ) {
         &acquire_disk( $1 );
         $::physical_swap{ $1 } = 0
       } elsif( $device =~ /^\/dev\/md\/dsk\/(.*)$/ ) {
@@ -185,7 +187,7 @@ sub acquire_mount {
     my( $device, $mountpoint, $type ) = ( split )[ 0, 2, 3 ];
     if( $type !~ /^(tmpfs)|(proc)|(fd)|(nfs)|(lofs)$/
         and $device !~ /^\/vol\// ) {
-      if( $device =~ /^\/dev\/dsk\/(c\d+t\d+d\d+s\d+)$/ ) {
+      if( $device =~ /^\/dev\/dsk\/(c\d+t[0-9A-F]+d\d+s\d+)$/ ) {
         &acquire_disk( $1 );
         $::physical_mount{ $1 } = $mountpoint;
       } elsif( $device =~ /^\/dev\/md\/dsk\/(.*)$/ ) {
@@ -225,7 +227,7 @@ sub acquire_cdrom {
   grep {
     if( /^cdrom\d+$/ and -l $D.$_ ) {
       my( $logical ) = readlink( $D.$_ );
-      if( $logical =~ s/^\/vol(\/dev\/rdsk\/((c\d*)t\d*d\d*))\/[^\\]+$/$2/ ) {
+      if( $logical =~ s/^\/vol(\/dev\/rdsk\/((c\d*)t[0-9A-F]*d\d*))\/[^\\]+$/$2/ ) {
         $c = $3;
         $physical = readlink( $1."s2" );
         if( $physical =~ s/^\.\.\/\.\.\/devices(\/(.*)\/sd@\d+,\d+):.*$/$1/ ) {
@@ -296,6 +298,23 @@ sub acquire_instance {
   close P2I;
 }
   
+sub acquire_dump {
+  my( $dump_dev, $savecore, $savecore_enable );
+  grep {
+    if (/Dump device:\s*\/dev\/dsk\/(c\d+t[0-9A-F]+d\d+s\d+)/) {
+      $::dump{ "device" } = "/dev/dsk/$1";
+    } elsif (/Dump device:\s*\/dev\/md\/dsk\/(.*)$/) {
+      $::dump{ "device" } = "/dev/md/dsk/$1";
+    }
+    if (/Savecore directory:\s*(.*)$/) {
+      $::dump{ "savecore" } = $1;
+    }
+    if (/Savecore enabled:\s*(.*)$/) {
+      $::dump{ "savecore_enabled" } = $1;
+    }
+  } `/usr/sbin/dumpadm`;
+}
+
 ###############################################################################
 
 sub output_html_header {
@@ -465,7 +484,7 @@ sub output_raid_html {
       $text = qq(<A NAME="$disk">$disk</A>);
       my $parent = $::soft_partition{ $disk }->{ "parent" };
       $text .= qq| (parent is <A HREF="#$parent">$parent</A>)|
-    } elsif( $disk =~ /^c\d+t\d+d\d+s\d+$/ ) {
+    } elsif( $disk =~ /^c\d+t[0-9A-F]+d\d+s\d+$/ ) {
       $text = qq(<A HREF="#$disk">$disk</A>)
     }
     print HTML qq($indent    <TD COLSPAN="$colspan" BGCOLOR="$bgcolour">$text</TD>\n);
@@ -493,7 +512,7 @@ sub output_concat_html {
       $bgcolour = $::colour{ "blue" }
     }
     my( @refs ) = @$r;
-    grep { s/^c\d+t\d+d\d+s\d+$/<A HREF="#$_">$_<\/A>/ } @refs;
+    grep { s/^c\d+t[0-9A-F]+d\d+s\d+$/<A HREF="#$_">$_<\/A>/ } @refs;
     grep { s/^d\d+$/$_ (<A HREF="#$::soft_partition{ $_ }->{ parent }">$::soft_partition{ $_ }->{ parent })<\/A>/ } @refs;
     $text = join( ", ", @refs );
     print HTML qq($indent    <TD COLSPAN="$colspan" BGCOLOR="$bgcolour">$text</TD>\n);
@@ -653,6 +672,33 @@ END
   }
 }
 
+sub output_dump_html {
+  print HTML <<END;
+<P><B>O/S Dump Information</B>
+<TABLE BORDER=0 CELLSPACING=0 CELLPADDING=0 BGCOLOR="#000000">
+<TR>
+  <TD>
+  <TABLE BORDER=0 CELLSPACING=2 CELLPADDING=2>
+  <TR BGCOLOR="$::colour{white}">
+    <TD>Dump Device</TD>
+    <TD>$::dump{'device'}</TD>
+  </TR>
+  <TR BGCOLOR="$::colour{white}">
+    <TD>Save core</TD>
+    <TD>$::dump{'savecore'}</TD>
+  </TR>
+  <TR BGCOLOR="$::colour{white}">
+    <TD>Savecore Enabled</TD>
+    <TD>$::dump{'savecore_enabled'}</TD>
+  </TR>
+  </TABLE>
+  </TD>
+</TR>
+</TABLE>
+
+END
+}
+
 sub output_legend_html {
   print HTML <<END;
 <P><B>Legend</B>
@@ -785,11 +831,13 @@ eval( '&acquire_toc' );
 eval( '&acquire_cdrom' );
 eval( '&acquire_tape' );
 eval( '&acquire_instance' );
-  
+eval( '&::acquire_dump' );
+
 open( HTML, ">$::dir/$::hostname.html" ) || die "couldn't open html file";
 &output_html_header;
 &output_controller_html;
 &output_metadisk_html;
+&output_dump_html;
 &output_legend_html;
 &output_html_footer;
 close HTML;
