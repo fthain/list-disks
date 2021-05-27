@@ -29,6 +29,7 @@
 # run on Perl version 5.002 and later.
 
 use strict;
+use 5.002;
 use POSIX qw(uname);
 
 $::list_disks_version = "1.2";
